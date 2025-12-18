@@ -1,11 +1,16 @@
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
+import { cors } from "hono/cors";
 import type { ApiResponse } from "shared/dist";
+
 
 export const app = new Hono()
 
-  .use(cors())
+
+export const api = new Hono()
+  .use(
+    cors()
+  )
 
   .get("/", (c) => {
     return c.text("Hello Hono!");
@@ -18,8 +23,10 @@ export const app = new Hono()
     };
 
     return c.json(data, { status: 200 });
-  });
+  })
 
+
+app.route('/api', api)
 app.use('*', serveStatic({ root: '../client/dist' }))
 app.get('*', serveStatic({ path: '../client/dist/index.html' }))
 
