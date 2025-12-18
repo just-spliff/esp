@@ -38,10 +38,8 @@ const TOPIC_BASE = "fsrmag";
 
 const COLOR_MAGNET = "#7C3AED"; // fiolet
 const COLOR_PRESS = "#22C55E"; // zielony
-
-// Ustawienia wydajności
-const REFRESH_RATE_MS = 50; // Odświeżanie UI co 50ms (20 FPS) - płynnie i lekko dla CPU
-const MAX_POINTS_IN_MEMORY = 10000; // Limit punktów w pamięci
+const WINDOW_MS = 30_000;       // Okno czasu: 30 sekund
+const REFRESH_RATE_MS = 40;     // Odświeżanie wykresu co 40ms (25 FPS)
 
 type EspState = {
   mv?: number;
@@ -75,7 +73,7 @@ function modeLabel(m?: number) {
 }
 function formatClock(ms: number) {
   const d = new Date(ms);
-  return d.toLocaleTimeString([], { hour12: false, minute: "2-digit", second: "2-digit" });
+  return d.toLocaleTimeString([], { minute: "2-digit", second: "2-digit", fractionalSecondDigits: 1 } as any);
 }
 
 function estimateMagnetPct(state: EspState, nowMs: number) {
@@ -120,7 +118,6 @@ function Dashboard() {
 
   const clientRef = React.useRef<MqttClient | null>(null);
 
-  // UI States
   const [connected, setConnected] = React.useState(false);
   const [statusText, setStatusText] = React.useState("Rozłączony");
   const [espStatus, setEspStatus] = React.useState("—");
@@ -129,7 +126,6 @@ function Dashboard() {
 
   const [state, setState] = React.useState<EspState>({});
 
-  // Controls States
   const [uiMode, setUiMode] = React.useState<"manual" | "pulse">("manual");
   const [manualPct, setManualPct] = React.useState(0);
   const draggingRef = React.useRef(false);
@@ -137,54 +133,33 @@ function Dashboard() {
   const [pulseHz, setPulseHz] = React.useState("2");
   const [pulseAmp, setPulseAmp] = React.useState("60");
 
-  // === NOWA LOGIKA DANYCH (BUFOROWANIE) ===
-  // 1. Trzymamy wszystkie punkty w refie, żeby nie renderować komponentu przy każdym pushu
+  // === NOWY SILNIK WYKRESU (Real-Time Buffer) ===
   const pointsBufferRef = React.useRef<Point[]>([]);
-  // 2. To jest stan widoczny dla Recharts, aktualizowany rzadziej
   const [viewData, setViewData] = React.useState<Point[]>([]);
+  const [now, setNow] = React.useState(Date.now()); // Potrzebne do przesuwania osi X
 
-  const WINDOW_MS = 30_000;
-  const [timeOffsetMs, setTimeOffsetMs] = React.useState(0);
-  const chartWheelRef = React.useRef<HTMLDivElement | null>(null);
-
-  // Pętla odświeżania wykresu (Game Loop pattern)
+  // Główna pętla odświeżania (Game Loop)
   React.useEffect(() => {
     const interval = setInterval(() => {
-      const now = Date.now();
-      const viewEnd = now - timeOffsetMs;
-      const viewStart = viewEnd - WINDOW_MS;
+      const currentNow = Date.now();
+      setNow(currentNow); // To wymusi przesunięcie osi X (Domain)
 
-      // Filtrujemy dane z bufora tylko na potrzeby widoku
-      const visiblePoints = pointsBufferRef.current.filter((p) => p.t >= viewStart && p.t <= viewEnd);
+      const cutoff = currentNow - WINDOW_MS;
 
-      // Optymalizacja: aktualizuj stan tylko jeśli są zmiany lub przesuwamy czas
-      setViewData(visiblePoints);
-
-      // Czyszczenie starej historii z bufora (garbage collection)
-      if (pointsBufferRef.current.length > MAX_POINTS_IN_MEMORY) {
-        const cutoff = now - (15 * 60 * 1000); // 15 min max w pamięci
-        pointsBufferRef.current = pointsBufferRef.current.filter(p => p.t > cutoff);
+      // 1. Usuń stare punkty (Garbage Collection)
+      // Jeśli punkt jest starszy niż okno, wylatuje.
+      if (pointsBufferRef.current.length > 0 && pointsBufferRef.current[0].t < cutoff) {
+        // Filtrujemy tylko jeśli faktycznie coś jest starego, żeby nie mielić tablicy bez sensu
+        pointsBufferRef.current = pointsBufferRef.current.filter(p => p.t >= cutoff);
       }
+
+      // 2. Aktualizuj stan dla Recharts
+      // Kopiujemy tablicę (płytka kopia jest szybka)
+      setViewData([...pointsBufferRef.current]);
 
     }, REFRESH_RATE_MS);
 
     return () => clearInterval(interval);
-  }, [timeOffsetMs, WINDOW_MS]); // Zależności są minimalne
-
-  // Obsługa scrolla
-  React.useEffect(() => {
-    const el = chartWheelRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const delta = e.deltaY;
-      const stepMs = 800;
-      const direction = delta > 0 ? -1 : 1;
-      const magnitude = Math.min(12, Math.max(1, Math.round(Math.abs(delta) / 50)));
-      setTimeOffsetMs((prev) => Math.max(0, prev + (direction * magnitude * stepMs)));
-    };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel as any);
   }, []);
 
   const sendCmd = React.useCallback((cmd: string) => {
@@ -199,17 +174,13 @@ function Dashboard() {
       username: username || undefined,
       password: password || undefined,
       reconnectPeriod: 2000,
-      keepalive: 30,
     });
     clientRef.current = c;
 
     c.on("connect", () => {
       setConnected(true);
       setStatusText("Połączony");
-      c.subscribe([topics.state, topics.status], (err) => {
-        if (err) setStatusText(`Subscribe error: ${err.message}`);
-      });
-      // Wymuś status po połączeniu
+      c.subscribe([topics.state, topics.status]);
       c.publish(topics.cmd, "PING");
     });
 
@@ -218,7 +189,6 @@ function Dashboard() {
       setConnected(false);
       setStatusText("Rozłączony");
     });
-    c.on("error", (e) => setStatusText(`MQTT error: ${String((e as any)?.message || e)}`));
 
     c.on("message", (topic, payload) => {
       const txt = payload.toString();
@@ -231,20 +201,18 @@ function Dashboard() {
       if (topic === topics.state) {
         try {
           const obj = JSON.parse(txt) as EspState;
-
-          // Aktualizuj stan UI (inputy, suwaki) - to jest lekkie
           setState(obj);
+
           if (!draggingRef.current && (obj.mode ?? 0) === 0 && typeof obj.manual === "number") {
             setManualPct(obj.manual);
           }
 
-          // Oblicz punkty
-          const now = Date.now();
+          const t = Date.now();
           const pressure = Number(obj.g ?? 0);
-          const magnet = estimateMagnetPct(obj, now);
+          const magnet = estimateMagnetPct(obj, t);
 
-          // WRZUĆ DO BUFORA (bez renderowania!)
-          pointsBufferRef.current.push({ t: now, pressure, magnet });
+          // PUSH do bufora - bez renderowania tutaj!
+          pointsBufferRef.current.push({ t, pressure, magnet });
 
         } catch { /* ignore */ }
       }
@@ -278,11 +246,10 @@ function Dashboard() {
 
   const stop = () => sendCmd("STOP");
 
-  // Najnowsze wartości do wyświetlenia w licznikach
+  // Ostatnie wartości do liczników
   const currentMag = viewData.length ? viewData[viewData.length - 1].magnet : 0;
   const currentG = typeof state.g === "number" ? state.g : 0;
 
-  // --- EKRAN LOGOWANIA ---
   if (!connected) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4 text-foreground">
@@ -291,7 +258,7 @@ function Dashboard() {
             <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-slate-100">
               <div className="h-6 w-6 rounded-full bg-slate-900" />
             </div>
-            <CardTitle className="text-xl">FSR Magnet Dashboard</CardTitle>
+            <CardTitle className="text-xl">FSR Magnet</CardTitle>
             <CardDescription>{BROKER_URL}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4 pt-4">
@@ -305,21 +272,18 @@ function Dashboard() {
                 <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="bg-slate-50" />
               </div>
             </div>
-            <Button className="w-full mt-2" onClick={connect} size="lg">Połącz z Brokerem</Button>
-            <div className="text-center text-xs text-muted-foreground pt-2 font-mono">
-              Status: <span className={statusText.includes("error") ? "text-red-500" : ""}>{statusText}</span>
-            </div>
+            <Button className="w-full mt-2" onClick={connect} size="lg">Połącz</Button>
+            <div className="text-center text-xs text-muted-foreground pt-2">{statusText}</div>
           </CardContent>
         </Card>
       </div>
     );
   }
 
-  const now = Date.now();
-  const viewEnd = now - timeOffsetMs;
-  const viewStart = viewEnd - WINDOW_MS;
+  // Obliczamy dynamiczne okno czasu dla osi X
+  const domainMin = now - WINDOW_MS;
+  const domainMax = now;
 
-  // --- DASHBOARD ---
   return (
     <div className="min-h-screen bg-slate-50/50 text-slate-900 p-4 md:p-6 lg:p-8">
       <div className="mx-auto max-w-[1600px] space-y-6">
@@ -334,13 +298,10 @@ function Dashboard() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
-            <StatusDot active={connected} label={`MQTT: ${connected ? "OK" : "ERR"}`} />
-            <StatusDot active={espStatus === "online"} label={`ESP: ${espStatus}`} />
+            <StatusDot active={connected} label="MQTT" />
+            <StatusDot active={espStatus === "online"} label="ESP" />
             <div className="h-6 w-px bg-slate-200 mx-1 hidden md:block" />
             <div className="flex items-center gap-2 bg-slate-100 px-3 py-1 rounded-md text-xs font-mono font-medium">MODE: {modeLabel(state.mode)}</div>
-            {timeOffsetMs > 0 && (
-              <Button size="sm" variant="outline" className="h-8 border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100" onClick={() => setTimeOffsetMs(0)}>WRÓĆ DO LIVE</Button>
-            )}
             <Button variant="ghost" size="sm" className="h-8 text-muted-foreground hover:text-red-600" onClick={logout}>Wyloguj</Button>
           </div>
         </header>
@@ -351,16 +312,14 @@ function Dashboard() {
           <div className="space-y-6">
             <div className="grid grid-cols-2 gap-4">
               <Card className="border-l-4 shadow-sm overflow-hidden relative" style={{ borderLeftColor: COLOR_PRESS }}>
-                <div className="absolute right-0 top-0 p-2 opacity-10"><div className="h-16 w-16 bg-green-500 rounded-full blur-2xl transform translate-x-4 -translate-y-4"></div></div>
                 <CardContent className="p-4">
-                  <div className="text-xs font-medium text-muted-foreground mb-1 uppercase tracking-wider">Nacisk (FSR)</div>
+                  <div className="text-xs font-medium text-muted-foreground mb-1 uppercase tracking-wider">Nacisk</div>
                   <div className="text-3xl font-bold tabular-nums tracking-tighter text-slate-900">
                     {currentG.toFixed(1)} <span className="text-base font-normal text-muted-foreground">g</span>
                   </div>
                 </CardContent>
               </Card>
               <Card className="border-l-4 shadow-sm overflow-hidden relative" style={{ borderLeftColor: COLOR_MAGNET }}>
-                <div className="absolute right-0 top-0 p-2 opacity-10"><div className="h-16 w-16 bg-violet-500 rounded-full blur-2xl transform translate-x-4 -translate-y-4"></div></div>
                 <CardContent className="p-4">
                   <div className="text-xs font-medium text-muted-foreground mb-1 uppercase tracking-wider">Magnes</div>
                   <div className="text-3xl font-bold tabular-nums tracking-tighter text-slate-900">
@@ -410,7 +369,7 @@ function Dashboard() {
                     </div>
                     <div className="flex gap-2">
                       <Input className="font-mono text-center text-lg h-10 w-24" inputMode="numeric" value={String(manualPct)} onChange={(e) => setManualPct(clamp(Number(e.target.value || "0"), 0, 100))} disabled={!connected} />
-                      <Button className="flex-1 bg-slate-900 hover:bg-slate-800 h-10" onClick={() => applyManual(manualPct)} disabled={!connected}>Ustaw wartość</Button>
+                      <Button className="flex-1 bg-slate-900 hover:bg-slate-800 h-10" onClick={() => applyManual(manualPct)} disabled={!connected}>Ustaw</Button>
                     </div>
                   </div>
                 )}
@@ -425,59 +384,32 @@ function Dashboard() {
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-1.5">
-                        <Label className="text-xs text-muted-foreground">Amplituda (%)</Label>
-                        <div className="relative">
-                          <Input className="pr-8 font-mono" inputMode="numeric" value={pulseAmp} onChange={(e) => setPulseAmp(e.target.value)} disabled={!connected} />
-                          <span className="absolute right-3 top-2.5 text-xs text-muted-foreground">%</span>
-                        </div>
+                        <Label className="text-xs text-muted-foreground">Amp (%)</Label>
+                        <Input className="font-mono" inputMode="numeric" value={pulseAmp} onChange={(e) => setPulseAmp(e.target.value)} disabled={!connected} />
                       </div>
                       <div className="space-y-1.5">
-                        <Label className="text-xs text-muted-foreground">Częstotliwość (Hz)</Label>
+                        <Label className="text-xs text-muted-foreground">Hz</Label>
                         <Input className="font-mono" inputMode="decimal" value={pulseHz} onChange={(e) => setPulseHz(e.target.value)} disabled={!connected} />
                       </div>
                     </div>
-                    <Button className="w-full bg-slate-900 hover:bg-slate-800" onClick={applyPulse} disabled={!connected}>Aktywuj Generator</Button>
+                    <Button className="w-full bg-slate-900 hover:bg-slate-800" onClick={applyPulse} disabled={!connected}>START PULSE</Button>
                   </div>
                 )}
                 <Separator />
                 <div className="grid grid-cols-2 gap-3">
-                  <Button variant="destructive" onClick={stop} disabled={!connected} className="shadow-red-100 shadow-lg hover:bg-red-600">AWARYJNY STOP</Button>
-                  <Button variant="outline" onClick={() => sendCmd("H")} disabled={!connected}>HELP (Log)</Button>
+                  <Button variant="destructive" onClick={stop} disabled={!connected} className="shadow-red-100 shadow-lg hover:bg-red-600">STOP</Button>
+                  <Button variant="outline" onClick={() => sendCmd("H")} disabled={!connected}>HELP</Button>
                 </div>
               </CardContent>
             </Card>
-
-            <div className="grid grid-cols-3 gap-3">
-              <div className="bg-white rounded-xl border p-3 text-center shadow-sm">
-                <div className="text-[10px] uppercase text-muted-foreground font-bold">Napięcie</div>
-                <div className="font-mono text-sm">{state.mv ?? "—"} <span className="text-[10px] text-muted-foreground">mV</span></div>
-              </div>
-              <div className="bg-white rounded-xl border p-3 text-center shadow-sm">
-                <div className="text-[10px] uppercase text-muted-foreground font-bold">Rezystancja</div>
-                <div className="font-mono text-sm">{typeof state.r === "number" ? Math.round(state.r) : "—"} <span className="text-[10px] text-muted-foreground">Ω</span></div>
-              </div>
-              <div className="bg-white rounded-xl border p-3 text-center shadow-sm">
-                <div className="text-[10px] uppercase text-muted-foreground font-bold">Bufor</div>
-                <div className="font-mono text-sm">{Math.round((pointsBufferRef.current.length * 50) / 1000)} <span className="text-[10px] text-muted-foreground">est. s</span></div>
-              </div>
-            </div>
           </div>
 
           {/* PRAWA KOLUMNA - WYKRES */}
-          <Card className="h-full min-h-[600px] flex flex-col shadow-sm border-slate-200">
+          <Card className="h-full min-h-[500px] flex flex-col shadow-sm border-slate-200">
             <CardHeader className="flex flex-row items-center justify-between pb-2 border-b border-slate-50">
               <div className="space-y-1">
-                <CardTitle className="flex items-center gap-2 text-base">
-                  Wizualizacja
-                  {timeOffsetMs > 0 && <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">HISTORY MODE</span>}
-                </CardTitle>
-                <div className="text-xs text-muted-foreground">
-                  {timeOffsetMs > 0 ? (
-                    <span className="font-mono font-medium text-amber-600">Przesunięcie: -{Math.round(timeOffsetMs / 1000)}s</span>
-                  ) : (
-                    <span className="text-emerald-600 font-medium animate-pulse">LIVE</span>
-                  )}
-                </div>
+                <CardTitle className="text-base flex items-center gap-2">Monitor Live <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse" /></CardTitle>
+                <div className="text-xs text-muted-foreground">Okno: {WINDOW_MS / 1000}s</div>
               </div>
               <div className="flex items-center gap-4 text-xs font-medium">
                 <div className="flex items-center gap-1.5 text-emerald-600"><div className="h-2 w-4 rounded-full bg-emerald-500" /> Nacisk</div>
@@ -485,41 +417,28 @@ function Dashboard() {
               </div>
             </CardHeader>
 
-            <CardContent className="flex-1 p-0 relative group">
-              <div className="absolute top-4 right-14 z-10 opacity-0 group-hover:opacity-100 transition-opacity bg-white/80 backdrop-blur-sm border px-3 py-1.5 rounded-md text-[10px] text-muted-foreground shadow-sm pointer-events-none">
-                Scrolluj kółkiem aby przewijać
-              </div>
-
-              <div ref={chartWheelRef} className="h-[600px] w-full">
-                {/* ResponsiveContainer często powoduje problemy z resize, ustalona wysokość + width 99% pomaga */}
+            <CardContent className="flex-1 p-0">
+              <div className="h-[500px] w-full">
                 <ResponsiveContainer width="99%" height="100%">
                   <LineChart data={viewData} margin={{ top: 20, right: 10, left: 0, bottom: 0 }}>
                     <CartesianGrid stroke="#f1f5f9" strokeDasharray="3 3" vertical={false} />
 
-                    {/* XAxis: tick={false} usuwa liczby, axisLine={false} usuwa grubą krechę */}
+                    {/* DYNAMICZNA OŚ X */}
                     <XAxis
                       dataKey="t"
                       type="number"
                       scale="time"
-                      domain={[viewStart, viewEnd]}
+                      domain={[domainMin, domainMax]} // Klucz do płynnego ruchu
                       tick={false}
                       axisLine={false}
-                      allowDataOverflow
+                      allowDataOverflow={false}
                     />
 
-                    <YAxis
-                      yAxisId="left" orientation="left" domain={[0, "auto"]}
-                      tick={{ fontSize: 10, fill: "#16a34a", fontWeight: 500 }}
-                      width={40} axisLine={false} tickLine={false}
-                    />
-                    <YAxis
-                      yAxisId="right" orientation="right" domain={[0, 100]}
-                      tick={{ fontSize: 10, fill: "#7c3aed", fontWeight: 500 }}
-                      width={40} axisLine={false} tickLine={false}
-                    />
+                    <YAxis yAxisId="left" orientation="left" domain={[0, "auto"]} tick={{ fontSize: 10, fill: "#16a34a" }} width={40} axisLine={false} tickLine={false} />
+                    <YAxis yAxisId="right" orientation="right" domain={[0, 100]} tick={{ fontSize: 10, fill: "#7c3aed" }} width={40} axisLine={false} tickLine={false} />
 
                     <Tooltip
-                      animationDuration={100}
+                      isAnimationActive={false}
                       contentStyle={{ borderRadius: "8px", border: "none", boxShadow: "0 4px 12px rgba(0,0,0,0.1)", fontSize: "12px" }}
                       labelFormatter={(label) => formatClock(Number(label))}
                       formatter={(value, name) => {
@@ -529,11 +448,10 @@ function Dashboard() {
                       }}
                     />
 
-                    {/* Zmieniono type na "monotone" dla gładkości */}
                     <Line
                       yAxisId="left" type="monotone" dataKey="pressure"
                       dot={false} stroke={COLOR_PRESS} strokeWidth={2}
-                      isAnimationActive={false}
+                      isAnimationActive={false} // Wyłączenie animacji przy każdym renderze = płynność
                     />
                     <Line
                       yAxisId="right" type="monotone" dataKey="magnet"
