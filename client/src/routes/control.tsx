@@ -183,32 +183,76 @@ function Dashboard() {
     (cmd: string) => {
       const c = clientRef.current;
       if (!c || !connected) return;
-      c.publish(topics.cmd, cmd.endsWith("\n") ? cmd : cmd + "\n");
+      c.publish(topics.cmd, cmd.endsWith("\n") ? cmd : cmd + "\n", {
+        qos: 0,
+        retain: false,
+      });
     },
     [connected, topics.cmd]
   );
 
   const connect = () => {
+    // If a previous client exists (e.g., user pressed connect again), close it first.
+    if (clientRef.current) {
+      try {
+        clientRef.current.end(true);
+      } catch {
+        /* ignore */
+      }
+      clientRef.current = null;
+    }
+
     setStatusText("Łączenie…");
+
     const c = mqtt.connect(BROKER_URL, {
       username: username,
       password: password,
-      clientId: "emqx_OTcyNz",
+      // Make the session identifiable and avoid clientId collisions
+      clientId: `web-${DEVICE_ID}-${Math.random().toString(16).slice(2)}`,
       reconnectPeriod: 2000,
+      connectTimeout: 10_000,
+      // Keepalive helps keep WS connections stable across mobile networks
+      keepalive: 30,
+      clean: true,
     });
+
     clientRef.current = c;
 
     c.on("connect", () => {
       setConnected(true);
       setStatusText("Połączony");
-      c.subscribe([topics.state, topics.status]);
-      c.publish(topics.cmd, "PING");
+      c.subscribe([topics.state, topics.status], (err) => {
+        if (err) {
+          console.error("MQTT subscribe error:", err);
+          setStatusText(
+            `Błąd subskrypcji: ${(err as any)?.message ?? String(err)}`
+          );
+        }
+      });
+      // Optional connectivity check for the ESP-side command handler
+      c.publish(topics.cmd, "PING\n");
     });
 
     c.on("reconnect", () => setStatusText("Ponowne łączenie…"));
+
+    c.on("offline", () => {
+      console.warn("MQTT offline");
+      setStatusText("Offline");
+    });
+
+    c.on("error", (err) => {
+      console.error("MQTT error:", err);
+      setStatusText(`Błąd MQTT: ${(err as any)?.message ?? String(err)}`);
+    });
+
     c.on("close", () => {
       setConnected(false);
       setStatusText("Rozłączony");
+    });
+
+    c.on("end", () => {
+      setConnected(false);
+      setStatusText("Zakończono");
     });
 
     c.on("message", (topic, payload) => {
