@@ -191,8 +191,8 @@ function Dashboard() {
   const connect = () => {
     setStatusText("Łączenie…");
     const c = mqtt.connect(BROKER_URL, {
-      username: username || undefined,
-      password: password || undefined,
+      username: username,
+      password: password,
       reconnectPeriod: 2000,
     });
     clientRef.current = c;
