@@ -193,6 +193,7 @@ function Dashboard() {
     const c = mqtt.connect(BROKER_URL, {
       username: username,
       password: password,
+      clientId: "emqx_OTcyNz",
       reconnectPeriod: 2000,
     });
     clientRef.current = c;
