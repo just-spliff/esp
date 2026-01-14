@@ -38,7 +38,7 @@ export const Route = createFileRoute("/control")({
 });
 
 // ===================== CONFIG =====================
-const BROKER_URL = "wss://mechanical-fey-spliff-ed1ace61.koyeb.app";
+const BROKER_URL = "wss://compulsory-leilah-spliff-e6097bf4.koyeb.app/mqtt";
 const DEVICE_ID = "3C893E124B00";
 const TOPIC_BASE = "fsrmag";
 
