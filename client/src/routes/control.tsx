@@ -38,7 +38,7 @@ export const Route = createFileRoute("/control")({
 });
 
 // ===================== CONFIG =====================
-const BROKER_URL = "wss://compulsory-leilah-spliff-e6097bf4.koyeb.app/mqtt";
+const BROKER_URL = "wss://rude-mink-spliff-b5348244.koyeb.app/mqtt";
 const DEVICE_ID = "3C893E124B00";
 const TOPIC_BASE = "fsrmag";
 
