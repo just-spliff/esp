@@ -340,7 +340,15 @@ function Dashboard() {
     sendCmd(pulseWave === "sine" ? `P ${hz} ${amp}` : `Q ${hz} ${amp}`);
   };
 
-  const stop = () => sendCmd("STOP");
+  const stop = () => {
+    // Wymuś natychmiastowe wyzerowanie wyjścia magnesu
+    // (na wypadek gdyby samo STOP nie ustawiał wyjścia na 0 po stronie ESP)
+    sendCmd("STOP");
+    sendCmd("M 0");
+
+    // Optymistycznie aktualizuj UI (stan z ESP i tak nadpisze to po chwili)
+    setManualPct(0);
+  };
 
   // Ostatnie wartości do liczników
   const currentMag = viewData.length ? viewData[viewData.length - 1].magnet : 0;
