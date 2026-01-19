@@ -45,7 +45,6 @@ const TOPIC_BASE = "fsrmag";
 const COLOR_MAGNET = "#7C3AED"; // fiolet
 const COLOR_PRESS = "#22C55E"; // zielony
 const WINDOW_MS = 30_000; // Okno czasu: 30 sekund
-const REFRESH_RATE_MS = 40; // Odświeżanie wykresu co 40ms (25 FPS)
 
 type EspState = {
   mv?: number;
@@ -148,35 +147,52 @@ function Dashboard() {
 
   // === NOWY SILNIK WYKRESU (Real-Time Buffer) ===
   const pointsBufferRef = React.useRef<Point[]>([]);
+  const bufferStartRef = React.useRef(0); // „początek” okna w buforze (bez kosztownego filter/shift)
+  const rafIdRef = React.useRef<number | null>(null);
+
   const [viewData, setViewData] = React.useState<Point[]>([]);
-  const [now, setNow] = React.useState(Date.now()); // Potrzebne do przesuwania osi X
 
-  // Główna pętla odświeżania (Game Loop)
-  React.useEffect(() => {
-    const interval = setInterval(() => {
-      const currentNow = Date.now();
-      setNow(currentNow); // To wymusi przesunięcie osi X (Domain)
+  const scheduleChartUpdate = React.useCallback(() => {
+    if (rafIdRef.current !== null) return; // już zaplanowane
 
-      const cutoff = currentNow - WINDOW_MS;
+    rafIdRef.current = window.requestAnimationFrame(() => {
+      rafIdRef.current = null;
 
-      // 1. Usuń stare punkty (Garbage Collection)
-      // Jeśli punkt jest starszy niż okno, wylatuje.
-      if (
-        pointsBufferRef.current.length > 0 &&
-        pointsBufferRef.current[0].t < cutoff
-      ) {
-        // Filtrujemy tylko jeśli faktycznie coś jest starego, żeby nie mielić tablicy bez sensu
-        pointsBufferRef.current = pointsBufferRef.current.filter(
-          (p) => p.t >= cutoff
-        );
+      const buf = pointsBufferRef.current;
+      if (!buf.length) {
+        setViewData([]);
+        return;
       }
 
-      // 2. Aktualizuj stan dla Recharts
-      // Kopiujemy tablicę (płytka kopia jest szybka)
-      setViewData([...pointsBufferRef.current]);
-    }, REFRESH_RATE_MS);
+      // Okno czasu „podąża” za najnowszym punktem – to minimalizuje opóźnienia odświeżania.
+      const latestT = buf[buf.length - 1].t;
+      const cutoff = latestT - WINDOW_MS;
 
-    return () => clearInterval(interval);
+      // Przesuwamy początek okna (O(k) tylko dla punktów, które wypadają z okna)
+      let start = bufferStartRef.current;
+      while (start < buf.length && buf[start].t < cutoff) start++;
+      bufferStartRef.current = start;
+
+      // Okresowo kompaktujemy bufor, żeby nie rósł w nieskończoność
+      if (start > 2000 && start > buf.length / 2) {
+        pointsBufferRef.current = buf.slice(start);
+        bufferStartRef.current = 0;
+      }
+
+      // Recharts wymaga nowej referencji tablicy
+      const s = bufferStartRef.current;
+      setViewData(pointsBufferRef.current.slice(s));
+    });
+  }, []);
+
+  // Sprzątanie RAF przy unmount
+  React.useEffect(() => {
+    return () => {
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+    };
   }, []);
 
   const sendCmd = React.useCallback(
@@ -188,7 +204,7 @@ function Dashboard() {
         retain: false,
       });
     },
-    [connected, topics.cmd]
+    [connected, topics.cmd],
   );
 
   const connect = () => {
@@ -225,7 +241,7 @@ function Dashboard() {
         if (err) {
           console.error("MQTT subscribe error:", err);
           setStatusText(
-            `Błąd subskrypcji: ${(err as any)?.message ?? String(err)}`
+            `Błąd subskrypcji: ${(err as any)?.message ?? String(err)}`,
           );
         }
       });
@@ -282,6 +298,8 @@ function Dashboard() {
 
           // PUSH do bufora - bez renderowania tutaj!
           pointsBufferRef.current.push({ t, pressure, magnet });
+          // Aktualizuj wykres najbliższą klatką (maks. ~60 FPS), tylko gdy pojawiają się nowe dane
+          scheduleChartUpdate();
         } catch {
           /* ignore */
         }
@@ -290,6 +308,10 @@ function Dashboard() {
   };
 
   const logout = () => {
+    if (rafIdRef.current !== null) {
+      window.cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
     clientRef.current?.end(true);
     clientRef.current = null;
     setConnected(false);
@@ -298,6 +320,10 @@ function Dashboard() {
 
   React.useEffect(() => {
     return () => {
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
       clientRef.current?.end(true);
       clientRef.current = null;
     };
@@ -367,9 +393,11 @@ function Dashboard() {
     );
   }
 
-  // Obliczamy dynamiczne okno czasu dla osi X
-  const domainMin = now - WINDOW_MS;
-  const domainMax = now;
+  // Obliczamy dynamiczne okno czasu dla osi X (podążamy za najnowszą próbką)
+  const domainMax = viewData.length
+    ? viewData[viewData.length - 1].t
+    : Date.now();
+  const domainMin = domainMax - WINDOW_MS;
 
   return (
     <div className="min-h-screen bg-slate-50/50 text-slate-900 p-4 md:p-6 lg:p-8">
@@ -513,7 +541,7 @@ function Dashboard() {
                         value={String(manualPct)}
                         onChange={(e) =>
                           setManualPct(
-                            clamp(Number(e.target.value || "0"), 0, 100)
+                            clamp(Number(e.target.value || "0"), 0, 100),
                           )
                         }
                         disabled={!connected}
