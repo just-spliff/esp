@@ -32,6 +32,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
 export const Route = createFileRoute("/control")({
   component: Dashboard,
@@ -144,6 +152,7 @@ function Dashboard() {
   const [pulseWave, setPulseWave] = React.useState<"sine" | "square">("sine");
   const [pulseHz, setPulseHz] = React.useState("2");
   const [pulseAmp, setPulseAmp] = React.useState("60");
+  const [helpOpen, setHelpOpen] = React.useState(false);
 
   // === NOWY SILNIK WYKRESU (Real-Time Buffer) ===
   const pointsBufferRef = React.useRef<Point[]>([]);
@@ -631,13 +640,78 @@ function Dashboard() {
                   >
                     STOP
                   </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => sendCmd("H")}
-                    disabled={!connected}
-                  >
-                    HELP
-                  </Button>
+                  <Dialog open={helpOpen} onOpenChange={setHelpOpen}>
+                    <DialogTrigger asChild>
+                      <Button variant="outline" disabled={!connected}>
+                        HELP
+                      </Button>
+                    </DialogTrigger>
+                    <DialogContent className="sm:max-w-lg">
+                      <DialogHeader>
+                        <DialogTitle>Instrukcja sterowania</DialogTitle>
+                        <DialogDescription>
+                          Najważniejsze informacje o trybach i komendach.
+                        </DialogDescription>
+                      </DialogHeader>
+
+                      <div className="space-y-4 text-sm leading-relaxed">
+                        <div className="space-y-1">
+                          <div className="font-semibold">Tryby pracy</div>
+                          <ul className="list-disc pl-5 space-y-1">
+                            <li>
+                              <span className="font-medium">MANUAL</span> —
+                              ręczne ustawienie mocy magnesu (0–100%).
+                            </li>
+                            <li>
+                              <span className="font-medium">PULSE</span> —
+                              generowanie fali (SINE lub SQUARE) z parametrami
+                              Hz i amplitudą.
+                            </li>
+                            <li>
+                              <span className="font-medium">TRACK</span> —
+                              sterowanie zależne od nacisku (g) i nastaw.
+                            </li>
+                          </ul>
+                        </div>
+
+                        <div className="space-y-1">
+                          <div className="font-semibold">Przyciski</div>
+                          <ul className="list-disc pl-5 space-y-1">
+                            <li>
+                              <span className="font-medium">Ustaw</span> —
+                              wysyła ustawioną wartość (MANUAL).
+                            </li>
+                            <li>
+                              <span className="font-medium">START PULSE</span> —
+                              uruchamia PULSE z bieżącymi parametrami.
+                            </li>
+                            <li>
+                              <span className="font-medium">STOP</span> —
+                              natychmiast zeruje elektromagnes (wysyła STOP i M
+                              0).
+                            </li>
+                          </ul>
+                        </div>
+
+                        <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                          <div className="font-semibold mb-1">Wskazówka</div>
+                          <div className="text-muted-foreground">
+                            Jeżeli urządzenie nie reaguje, sprawdź status
+                            MQTT/ESP w nagłówku oraz poprawność ID urządzenia.
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex justify-end gap-2">
+                        <Button
+                          variant="outline"
+                          onClick={() => setHelpOpen(false)}
+                        >
+                          Zamknij
+                        </Button>
+                      </div>
+                    </DialogContent>
+                  </Dialog>
                 </div>
               </CardContent>
             </Card>
