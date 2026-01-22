@@ -53,6 +53,7 @@ const TOPIC_BASE = "fsrmag";
 const COLOR_MAGNET = "#7C3AED"; // fiolet
 const COLOR_PRESS = "#22C55E"; // zielony
 const WINDOW_MS = 30_000; // Okno czasu: 30 sekund
+const MAX_VIEW_POINTS = 1200; // limit punktów renderowanych na wykresie (wydajność)
 
 const G0 = 9.81; // [m/s^2] przyspieszenie ziemskie do przeliczenia g -> N
 
@@ -100,11 +101,22 @@ function formatClock(ms: number) {
   } as any);
 }
 
-function estimateMagnetPct(state: EspState, nowMs: number) {
-  if (typeof state.magOutPct === "number")
+function estimateMagnetPct(
+  state: EspState,
+  nowMs: number,
+  pulseStartMs?: number | null,
+) {
+  // Prefer actual output reported by ESP (eliminates phase mismatch)
+  if (typeof state.magOutPct === "number") {
     return clamp(state.magOutPct, 0, 100);
+  }
+
   const mode = state.mode ?? 0;
+
+  // MANUAL
   if (mode === 0) return clamp(state.manual ?? 0, 0, 100);
+
+  // TRACK (bazuje na wartości zwrotnej z ESP w jednostkach urządzenia)
   if (mode === 2) {
     const g = state.g ?? 0;
     const target = state.trackTarget ?? 0;
@@ -112,15 +124,23 @@ function estimateMagnetPct(state: EspState, nowMs: number) {
     const maxPct = state.trackMax ?? 100;
     return clamp(Math.round(kp * (target - g)), 0, maxPct);
   }
+
+  // PULSE
   const hz = Math.max(0.01, state.pulseHz ?? 1);
   const amp = clamp(state.pulseAmp ?? 0, 0, 100);
   const wave = state.pulseWave ?? 0;
-  const tSec = nowMs / 1000;
+
+  // Ważne: fazę liczymy od momentu wejścia w tryb PULSE, a nie od epoki czasu.
+  // To zmniejsza pozorne przesunięcie fazowe wynikające z opóźnień sieci i startu trybu.
+  const t0 = typeof pulseStartMs === "number" ? pulseStartMs : 0;
+  const tSec = (nowMs - t0) / 1000;
   const phase = (tSec * hz) % 1;
+
   if (wave === 0) {
     const s = 0.5 * (Math.sin(2 * Math.PI * phase) + 1);
     return clamp(Math.round(s * amp), 0, 100);
   }
+
   return phase < 0.5 ? amp : 0;
 }
 
@@ -148,6 +168,10 @@ function Dashboard() {
   // Throttle UI/state updates to avoid rerendering on every MQTT packet
   const lastStateRef = React.useRef<EspState>({});
   const uiUpdateTimerRef = React.useRef<number | null>(null);
+
+  // Align PULSE phase to the moment we enter PULSE mode (reduces apparent phase shift)
+  const pulseStartMsRef = React.useRef<number | null>(null);
+  const lastModeRef = React.useRef<number | null>(null);
 
   const scheduleUiUpdate = React.useCallback(() => {
     if (uiUpdateTimerRef.current !== null) return;
@@ -220,9 +244,30 @@ function Dashboard() {
         bufferStartRef.current = 0;
       }
 
-      // Recharts wymaga nowej referencji tablicy
+      // Recharts wymaga nowej referencji tablicy.
+      // Dodatkowo: decymacja do MAX_VIEW_POINTS, żeby nie przeciążać renderu.
       const s = bufferStartRef.current;
-      setViewData(pointsBufferRef.current.slice(s));
+      const windowData = pointsBufferRef.current.slice(s);
+
+      if (windowData.length <= MAX_VIEW_POINTS) {
+        setViewData(windowData);
+        return;
+      }
+
+      const step = Math.ceil(windowData.length / MAX_VIEW_POINTS);
+      const decimated: Point[] = [];
+      for (let i = 0; i < windowData.length; i += step) {
+        decimated.push(windowData[i]);
+      }
+      // Upewnij się, że ostatni punkt jest zawsze obecny
+      const last = windowData[windowData.length - 1];
+      if (
+        decimated.length === 0 ||
+        decimated[decimated.length - 1].t !== last.t
+      ) {
+        decimated.push(last);
+      }
+      setViewData(decimated);
     });
   }, []);
 
@@ -335,8 +380,20 @@ function Dashboard() {
           scheduleUiUpdate();
 
           const t = Date.now();
+
+          // Wykryj zmianę trybu, aby ustawić punkt startowy fazy PULSE
+          const modeNow = obj.mode ?? 0;
+          if (lastModeRef.current !== modeNow) {
+            if (modeNow === 1) {
+              pulseStartMsRef.current = t;
+            } else {
+              pulseStartMsRef.current = null;
+            }
+            lastModeRef.current = modeNow;
+          }
+
           const pressureN = gramsToNewtons(Number(obj.g ?? 0));
-          const magnet = estimateMagnetPct(obj, t);
+          const magnet = estimateMagnetPct(obj, t, pulseStartMsRef.current);
 
           // PUSH do bufora - bez renderowania tutaj!
           pointsBufferRef.current.push({ t, pressure: pressureN, magnet });
@@ -371,6 +428,9 @@ function Dashboard() {
     }
     clientRef.current?.end(true);
     clientRef.current = null;
+    // Clear pulse phase alignment refs on logout
+    pulseStartMsRef.current = null;
+    lastModeRef.current = null;
     setConnected(false);
     setStatusText("Rozłączony");
   };
@@ -381,6 +441,13 @@ function Dashboard() {
         window.cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = null;
       }
+      if (uiUpdateTimerRef.current !== null) {
+        window.clearTimeout(uiUpdateTimerRef.current);
+        uiUpdateTimerRef.current = null;
+      }
+      // Clear pulse phase alignment refs on unmount
+      pulseStartMsRef.current = null;
+      lastModeRef.current = null;
       clientRef.current?.end(true);
       clientRef.current = null;
     };
