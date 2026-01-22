@@ -223,6 +223,8 @@ function Dashboard() {
   // === RECORDING ===
   const [isRecording, setIsRecording] = React.useState(false);
   const recordedRef = React.useRef<RecordedPoint[]>([]);
+  const [recordedCount, setRecordedCount] = React.useState(0);
+  const lastRecCountUpdateRef = React.useRef(0);
 
   // === NOWY SILNIK WYKRESU (Real-Time Buffer) ===
   const pointsBufferRef = React.useRef<Point[]>([]);
@@ -478,6 +480,11 @@ function Dashboard() {
                 recordedRef.current.length - MAX_REC,
               );
             }
+            // Update UI (enable Export) at a low rate; refs alone don't trigger re-renders
+            if (t - lastRecCountUpdateRef.current > 250) {
+              lastRecCountUpdateRef.current = t;
+              setRecordedCount(recordedRef.current.length);
+            }
           }
 
           // PUSH do bufora - bez renderowania tutaj!
@@ -517,6 +524,7 @@ function Dashboard() {
     pulseStartMsRef.current = null;
     lastModeRef.current = null;
     setIsRecording(false);
+    setRecordedCount(0);
     setConnected(false);
     setStatusText("Rozłączony");
   };
@@ -535,6 +543,7 @@ function Dashboard() {
       pulseStartMsRef.current = null;
       lastModeRef.current = null;
       setIsRecording(false);
+      setRecordedCount(0);
       clientRef.current?.end(true);
       clientRef.current = null;
     };
@@ -559,11 +568,14 @@ function Dashboard() {
 
   const startRecording = () => {
     recordedRef.current = [];
+    setRecordedCount(0);
+    lastRecCountUpdateRef.current = 0;
     setIsRecording(true);
   };
 
   const stopRecording = () => {
     setIsRecording(false);
+    setRecordedCount(recordedRef.current.length);
   };
 
   const exportCsv = () => {
@@ -1037,7 +1049,7 @@ function Dashboard() {
                   variant="secondary"
                   className="h-8"
                   onClick={exportCsv}
-                  disabled={recordedRef.current.length === 0}
+                  disabled={recordedCount === 0}
                 >
                   Export CSV
                 </Button>
