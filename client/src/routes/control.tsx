@@ -53,9 +53,11 @@ const TOPIC_BASE = "fsrmag";
 const COLOR_MAGNET = "#7C3AED"; // fiolet
 const COLOR_PRESS = "#22C55E"; // zielony
 const WINDOW_MS = 30_000; // Okno czasu: 30 sekund
-const MAX_VIEW_POINTS = 1200; // limit punktów renderowanych na wykresie (wydajność)
+const MAX_VIEW_POINTS = 800; // limit punktów renderowanych na wykresie (wydajność)
 
 const G0 = 9.81; // [m/s^2] przyspieszenie ziemskie do przeliczenia g -> N
+const SMOOTH_PRESS_ALPHA = 0.25;
+const SMOOTH_MAG_ALPHA = 0.25;
 
 function gramsToNewtons(m_g: number) {
   // m_g: masa w gramach (równoważnik), wynik: siła w niutonach
@@ -81,6 +83,16 @@ type Point = {
   t: number;
   pressure: number;
   magnet: number;
+};
+
+type RecordedPoint = {
+  t: number; // ms (Date.now)
+  g: number; // grams from ESP (raw)
+  pressureN_raw: number;
+  pressureN: number; // smoothed
+  magnet_raw: number;
+  magnet: number; // smoothed
+  mode: number;
 };
 
 function clamp(v: number, lo: number, hi: number) {
@@ -173,6 +185,10 @@ function Dashboard() {
   const pulseStartMsRef = React.useRef<number | null>(null);
   const lastModeRef = React.useRef<number | null>(null);
 
+  // EMA smoothing state (kept across MQTT packets)
+  const pressEmaRef = React.useRef<number | null>(null);
+  const magEmaRef = React.useRef<number | null>(null);
+
   const scheduleUiUpdate = React.useCallback(() => {
     if (uiUpdateTimerRef.current !== null) return;
 
@@ -209,6 +225,10 @@ function Dashboard() {
   const [pulseHz, setPulseHz] = React.useState("2");
   const [pulseAmp, setPulseAmp] = React.useState("60");
   const [helpOpen, setHelpOpen] = React.useState(false);
+
+  // === RECORDING ===
+  const [isRecording, setIsRecording] = React.useState(false);
+  const recordedRef = React.useRef<RecordedPoint[]>([]);
 
   // === NOWY SILNIK WYKRESU (Real-Time Buffer) ===
   const pointsBufferRef = React.useRef<Point[]>([]);
@@ -317,7 +337,7 @@ function Dashboard() {
       if (!pendingChartUpdateRef.current) return;
       pendingChartUpdateRef.current = false;
       computeAndSetViewData();
-    }, 50); // 20 Hz
+    }, 66); // 20 Hz
 
     return () => {
       if (chartTimerRef.current !== null) {
@@ -436,8 +456,51 @@ function Dashboard() {
             lastModeRef.current = modeNow;
           }
 
-          const pressureN = gramsToNewtons(Number(obj.g ?? 0));
-          const magnet = estimateMagnetPct(obj, t, pulseStartMsRef.current);
+          const gRaw = Number(obj.g ?? 0);
+          const pressureRaw = gramsToNewtons(gRaw);
+          const magnetRaw = estimateMagnetPct(obj, t, pulseStartMsRef.current);
+
+          // EMA smoothing
+          if (pressEmaRef.current === null) pressEmaRef.current = pressureRaw;
+          else {
+            pressEmaRef.current =
+              pressEmaRef.current +
+              SMOOTH_PRESS_ALPHA * (pressureRaw - pressEmaRef.current);
+          }
+
+          if (magEmaRef.current === null) magEmaRef.current = magnetRaw;
+          else {
+            magEmaRef.current =
+              magEmaRef.current +
+              SMOOTH_MAG_ALPHA * (magnetRaw - magEmaRef.current);
+          }
+
+          const pressureN = pressEmaRef.current;
+          const magnet = magEmaRef.current;
+
+          // PUSH do bufora
+          pointsBufferRef.current.push({ t, pressure: pressureN, magnet });
+
+          // Recording
+          if (isRecording) {
+            recordedRef.current.push({
+              t,
+              g: gRaw,
+              pressureN_raw: pressureRaw,
+              pressureN,
+              magnet_raw: magnetRaw,
+              magnet,
+              mode: obj.mode ?? 0,
+            });
+
+            // Safety cap
+            const MAX_REC = 200_000;
+            if (recordedRef.current.length > MAX_REC) {
+              recordedRef.current = recordedRef.current.slice(
+                recordedRef.current.length - MAX_REC,
+              );
+            }
+          }
 
           // PUSH do bufora - bez renderowania tutaj!
           pointsBufferRef.current.push({ t, pressure: pressureN, magnet });
@@ -475,6 +538,9 @@ function Dashboard() {
     // Clear pulse phase alignment refs on logout
     pulseStartMsRef.current = null;
     lastModeRef.current = null;
+    pressEmaRef.current = null;
+    magEmaRef.current = null;
+    setIsRecording(false);
     setConnected(false);
     setStatusText("Rozłączony");
   };
@@ -492,6 +558,8 @@ function Dashboard() {
       // Clear pulse phase alignment refs on unmount
       pulseStartMsRef.current = null;
       lastModeRef.current = null;
+      pressEmaRef.current = null;
+      magEmaRef.current = null;
       clientRef.current?.end(true);
       clientRef.current = null;
     };
@@ -512,6 +580,63 @@ function Dashboard() {
     lastModeRef.current = 1;
 
     sendCmd(pulseWave === "sine" ? `P ${hz} ${amp}` : `Q ${hz} ${amp}`);
+  };
+
+  const startRecording = () => {
+    recordedRef.current = [];
+    setIsRecording(true);
+  };
+
+  const stopRecording = () => {
+    setIsRecording(false);
+  };
+
+  const exportCsv = () => {
+    const rows = recordedRef.current;
+    if (!rows.length) return;
+
+    const header = [
+      "t_ms",
+      "t_iso",
+      "mode",
+      "g",
+      "pressureN_raw",
+      "pressureN",
+      "magnet_raw",
+      "magnet",
+    ];
+
+    const lines = [header.join(",")];
+    for (const r of rows) {
+      const iso = new Date(r.t).toISOString();
+      lines.push(
+        [
+          r.t,
+          iso,
+          r.mode,
+          r.g,
+          r.pressureN_raw.toFixed(6),
+          r.pressureN.toFixed(6),
+          r.magnet_raw.toFixed(6),
+          r.magnet.toFixed(6),
+        ].join(","),
+      );
+    }
+
+    const blob = new Blob([lines.join("\n")], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `fsrmag-${DEVICE_ID}-${ts}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 
   const stop = () => {
@@ -898,13 +1023,50 @@ function Dashboard() {
                   Okno: {WINDOW_MS / 1000}s
                 </div>
               </div>
-              <div className="flex items-center gap-4 text-xs font-medium">
-                <div className="flex items-center gap-1.5 text-emerald-600">
-                  <div className="h-2 w-4 rounded-full bg-emerald-500" /> Nacisk
+              <div className="flex flex-wrap items-center gap-3 text-xs font-medium">
+                <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-1.5 text-emerald-600">
+                    <div className="h-2 w-4 rounded-full bg-emerald-500" />{" "}
+                    Nacisk
+                  </div>
+                  <div className="flex items-center gap-1.5 text-violet-600">
+                    <div className="h-2 w-4 rounded-full bg-violet-500" />{" "}
+                    Magnes
+                  </div>
                 </div>
-                <div className="flex items-center gap-1.5 text-violet-600">
-                  <div className="h-2 w-4 rounded-full bg-violet-500" /> Magnes
-                </div>
+
+                <div className="h-6 w-px bg-slate-200" />
+
+                {!isRecording ? (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8"
+                    onClick={startRecording}
+                    disabled={!connected}
+                  >
+                    Nagraj
+                  </Button>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    className="h-8"
+                    onClick={stopRecording}
+                  >
+                    Stop nagrania
+                  </Button>
+                )}
+
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  className="h-8"
+                  onClick={exportCsv}
+                  disabled={recordedRef.current.length === 0}
+                >
+                  Export CSV
+                </Button>
               </div>
             </CardHeader>
 
