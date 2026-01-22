@@ -145,6 +145,31 @@ function Dashboard() {
 
   const clientRef = React.useRef<MqttClient | null>(null);
 
+  // Throttle UI/state updates to avoid rerendering on every MQTT packet
+  const lastStateRef = React.useRef<EspState>({});
+  const uiUpdateTimerRef = React.useRef<number | null>(null);
+
+  const scheduleUiUpdate = React.useCallback(() => {
+    if (uiUpdateTimerRef.current !== null) return;
+
+    // ~10 Hz UI refresh is sufficient; chart is updated separately via RAF
+    uiUpdateTimerRef.current = window.setTimeout(() => {
+      uiUpdateTimerRef.current = null;
+
+      const obj = lastStateRef.current;
+      setState(obj);
+
+      // Keep MANUAL slider synced, but do it on the throttled cadence
+      if (
+        !draggingRef.current &&
+        (obj.mode ?? 0) === 0 &&
+        typeof obj.manual === "number"
+      ) {
+        setManualPct(obj.manual);
+      }
+    }, 100);
+  }, []);
+
   const [connected, setConnected] = React.useState(false);
   const [statusText, setStatusText] = React.useState("Rozłączony");
   const [espStatus, setEspStatus] = React.useState("—");
@@ -201,13 +226,19 @@ function Dashboard() {
     });
   }, []);
 
-  // Sprzątanie RAF przy unmount
+  // Sprzątanie RAF i throttlera przy unmount
   React.useEffect(() => {
     return () => {
       if (rafIdRef.current !== null) {
         window.cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = null;
       }
+      if (uiUpdateTimerRef.current !== null) {
+        window.clearTimeout(uiUpdateTimerRef.current);
+        uiUpdateTimerRef.current = null;
+      }
+      clientRef.current?.end(true);
+      clientRef.current = null;
     };
   }, []);
 
@@ -298,15 +329,10 @@ function Dashboard() {
       if (topic === topics.state) {
         try {
           const obj = JSON.parse(txt) as EspState;
-          setState(obj);
 
-          if (
-            !draggingRef.current &&
-            (obj.mode ?? 0) === 0 &&
-            typeof obj.manual === "number"
-          ) {
-            setManualPct(obj.manual);
-          }
+          // Store latest state and update UI on a throttled cadence
+          lastStateRef.current = obj;
+          scheduleUiUpdate();
 
           const t = Date.now();
           const pressureN = gramsToNewtons(Number(obj.g ?? 0));
@@ -314,6 +340,17 @@ function Dashboard() {
 
           // PUSH do bufora - bez renderowania tutaj!
           pointsBufferRef.current.push({ t, pressure: pressureN, magnet });
+
+          // Hard cap buffer to prevent long-session memory growth
+          const MAX_BUF = 20_000;
+          const buf = pointsBufferRef.current;
+          if (buf.length > MAX_BUF) {
+            // Keep the newest samples; adjust window start accordingly
+            const drop = buf.length - MAX_BUF;
+            pointsBufferRef.current = buf.slice(drop);
+            bufferStartRef.current = Math.max(0, bufferStartRef.current - drop);
+          }
+
           // Aktualizuj wykres najbliższą klatką (maks. ~60 FPS), tylko gdy pojawiają się nowe dane
           scheduleChartUpdate();
         } catch {
@@ -327,6 +364,10 @@ function Dashboard() {
     if (rafIdRef.current !== null) {
       window.cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = null;
+    }
+    if (uiUpdateTimerRef.current !== null) {
+      window.clearTimeout(uiUpdateTimerRef.current);
+      uiUpdateTimerRef.current = null;
     }
     clientRef.current?.end(true);
     clientRef.current = null;
