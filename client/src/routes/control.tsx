@@ -225,6 +225,11 @@ function Dashboard() {
   const recordedRef = React.useRef<RecordedPoint[]>([]);
   const [recordedCount, setRecordedCount] = React.useState(0);
   const lastRecCountUpdateRef = React.useRef(0);
+  const isRecordingRef = React.useRef(false);
+
+  React.useEffect(() => {
+    isRecordingRef.current = isRecording;
+  }, [isRecording]);
 
   // === NOWY SILNIK WYKRESU (Real-Time Buffer) ===
   const pointsBufferRef = React.useRef<Point[]>([]);
@@ -460,7 +465,7 @@ function Dashboard() {
           pointsBufferRef.current.push({ t, pressure: pressureN, magnet });
 
           // RECORDING (optional)
-          if (isRecording) {
+          if (isRecordingRef.current) {
             const rec: RecordedPoint = {
               t,
               t_iso: new Date(t).toISOString(),
@@ -486,9 +491,6 @@ function Dashboard() {
               setRecordedCount(recordedRef.current.length);
             }
           }
-
-          // PUSH do bufora - bez renderowania tutaj!
-          pointsBufferRef.current.push({ t, pressure: pressureN, magnet });
 
           // Hard cap buffer to prevent long-session memory growth
           const MAX_BUF = 20_000;
@@ -525,6 +527,7 @@ function Dashboard() {
     lastModeRef.current = null;
     setIsRecording(false);
     setRecordedCount(0);
+    isRecordingRef.current = false;
     setConnected(false);
     setStatusText("Rozłączony");
   };
@@ -544,6 +547,7 @@ function Dashboard() {
       lastModeRef.current = null;
       setIsRecording(false);
       setRecordedCount(0);
+      isRecordingRef.current = false;
       clientRef.current?.end(true);
       clientRef.current = null;
     };
@@ -570,10 +574,12 @@ function Dashboard() {
     recordedRef.current = [];
     setRecordedCount(0);
     lastRecCountUpdateRef.current = 0;
+    isRecordingRef.current = true;
     setIsRecording(true);
   };
 
   const stopRecording = () => {
+    isRecordingRef.current = false;
     setIsRecording(false);
     setRecordedCount(recordedRef.current.length);
   };
