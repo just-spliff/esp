@@ -213,70 +213,88 @@ function Dashboard() {
   // === NOWY SILNIK WYKRESU (Real-Time Buffer) ===
   const pointsBufferRef = React.useRef<Point[]>([]);
   const bufferStartRef = React.useRef(0); // „początek” okna w buforze (bez kosztownego filter/shift)
-  const rafIdRef = React.useRef<number | null>(null);
+  const chartTimerRef = React.useRef<number | null>(null);
+  const pendingChartUpdateRef = React.useRef(false);
 
   const [viewData, setViewData] = React.useState<Point[]>([]);
 
-  const scheduleChartUpdate = React.useCallback(() => {
-    if (rafIdRef.current !== null) return; // już zaplanowane
+  // Downsampling that preserves edges for square wave (prevents apparent phase shift)
+  function downsampleWindow(windowData: Point[], maxPoints: number): Point[] {
+    if (windowData.length <= maxPoints) return windowData;
 
-    rafIdRef.current = window.requestAnimationFrame(() => {
-      rafIdRef.current = null;
+    // Always keep transition points (magnet changes) + first/last
+    const kept: Point[] = [];
+    kept.push(windowData[0]);
+    for (let i = 1; i < windowData.length; i++) {
+      const prev = windowData[i - 1];
+      const cur = windowData[i];
+      if (cur.magnet !== prev.magnet) kept.push(cur);
+    }
+    const last = windowData[windowData.length - 1];
+    if (kept[kept.length - 1].t !== last.t) kept.push(last);
 
-      const buf = pointsBufferRef.current;
-      if (!buf.length) {
-        setViewData([]);
-        return;
-      }
+    // If keeping edges is already enough, return them (stable edges > uniform sampling)
+    if (kept.length >= maxPoints) {
+      const step = Math.ceil(kept.length / maxPoints);
+      const out: Point[] = [];
+      for (let i = 0; i < kept.length; i += step) out.push(kept[i]);
+      if (out[out.length - 1].t !== last.t) out.push(last);
+      return out;
+    }
 
-      // Okno czasu „podąża” za najnowszym punktem – to minimalizuje opóźnienia odświeżania.
-      const latestT = buf[buf.length - 1].t;
-      const cutoff = latestT - WINDOW_MS;
+    // Otherwise fill remaining budget with uniform sampling from the full window
+    const remaining = maxPoints - kept.length;
+    const step = Math.ceil(windowData.length / Math.max(1, remaining));
+    const out: Point[] = [...kept];
+    for (let i = 0; i < windowData.length; i += step) {
+      out.push(windowData[i]);
+      if (out.length >= maxPoints) break;
+    }
 
-      // Przesuwamy początek okna (O(k) tylko dla punktów, które wypadają z okna)
-      let start = bufferStartRef.current;
-      while (start < buf.length && buf[start].t < cutoff) start++;
-      bufferStartRef.current = start;
+    // Deduplicate by timestamp and sort
+    const map = new Map<number, Point>();
+    for (const p of out) map.set(p.t, p);
+    const merged = Array.from(map.values()).sort((a, b) => a.t - b.t);
 
-      // Okresowo kompaktujemy bufor, żeby nie rósł w nieskończoność
-      if (start > 2000 && start > buf.length / 2) {
-        pointsBufferRef.current = buf.slice(start);
-        bufferStartRef.current = 0;
-      }
+    const mergedLast = merged[merged.length - 1];
+    if (mergedLast.t !== last.t) merged.push(last);
+    return merged;
+  }
 
-      // Recharts wymaga nowej referencji tablicy.
-      // Dodatkowo: decymacja do MAX_VIEW_POINTS, żeby nie przeciążać renderu.
-      const s = bufferStartRef.current;
-      const windowData = pointsBufferRef.current.slice(s);
+  const computeAndSetViewData = React.useCallback(() => {
+    const buf = pointsBufferRef.current;
+    if (!buf.length) {
+      setViewData([]);
+      return;
+    }
 
-      if (windowData.length <= MAX_VIEW_POINTS) {
-        setViewData(windowData);
-        return;
-      }
+    const latestT = buf[buf.length - 1].t;
+    const cutoff = latestT - WINDOW_MS;
 
-      const step = Math.ceil(windowData.length / MAX_VIEW_POINTS);
-      const decimated: Point[] = [];
-      for (let i = 0; i < windowData.length; i += step) {
-        decimated.push(windowData[i]);
-      }
-      // Upewnij się, że ostatni punkt jest zawsze obecny
-      const last = windowData[windowData.length - 1];
-      if (
-        decimated.length === 0 ||
-        decimated[decimated.length - 1].t !== last.t
-      ) {
-        decimated.push(last);
-      }
-      setViewData(decimated);
-    });
+    let start = bufferStartRef.current;
+    while (start < buf.length && buf[start].t < cutoff) start++;
+    bufferStartRef.current = start;
+
+    if (start > 2000 && start > buf.length / 2) {
+      pointsBufferRef.current = buf.slice(start);
+      bufferStartRef.current = 0;
+    }
+
+    const s = bufferStartRef.current;
+    const windowData = pointsBufferRef.current.slice(s);
+    setViewData(downsampleWindow(windowData, MAX_VIEW_POINTS));
   }, []);
 
-  // Sprzątanie RAF i throttlera przy unmount
+  const requestChartUpdate = React.useCallback(() => {
+    pendingChartUpdateRef.current = true;
+  }, []);
+
+  // Sprzątanie timerów i throttlera przy unmount
   React.useEffect(() => {
     return () => {
-      if (rafIdRef.current !== null) {
-        window.cancelAnimationFrame(rafIdRef.current);
-        rafIdRef.current = null;
+      if (chartTimerRef.current !== null) {
+        window.clearInterval(chartTimerRef.current);
+        chartTimerRef.current = null;
       }
       if (uiUpdateTimerRef.current !== null) {
         window.clearTimeout(uiUpdateTimerRef.current);
@@ -286,6 +304,28 @@ function Dashboard() {
       clientRef.current = null;
     };
   }, []);
+
+  // Timer effect to update chart at a fixed rate
+  React.useEffect(() => {
+    // Update the chart at a fixed rate (e.g. 20 Hz) to avoid re-rendering on every MQTT packet.
+    if (chartTimerRef.current !== null) {
+      window.clearInterval(chartTimerRef.current);
+      chartTimerRef.current = null;
+    }
+
+    chartTimerRef.current = window.setInterval(() => {
+      if (!pendingChartUpdateRef.current) return;
+      pendingChartUpdateRef.current = false;
+      computeAndSetViewData();
+    }, 50); // 20 Hz
+
+    return () => {
+      if (chartTimerRef.current !== null) {
+        window.clearInterval(chartTimerRef.current);
+        chartTimerRef.current = null;
+      }
+    };
+  }, [computeAndSetViewData]);
 
   const sendCmd = React.useCallback(
     (cmd: string) => {
@@ -408,8 +448,8 @@ function Dashboard() {
             bufferStartRef.current = Math.max(0, bufferStartRef.current - drop);
           }
 
-          // Aktualizuj wykres najbliższą klatką (maks. ~60 FPS), tylko gdy pojawiają się nowe dane
-          scheduleChartUpdate();
+          // Zgłoś potrzebę aktualizacji wykresu (wykres odświeża się z ustaloną częstotliwością)
+          requestChartUpdate();
         } catch {
           /* ignore */
         }
@@ -418,9 +458,9 @@ function Dashboard() {
   };
 
   const logout = () => {
-    if (rafIdRef.current !== null) {
-      window.cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = null;
+    if (chartTimerRef.current !== null) {
+      window.clearInterval(chartTimerRef.current);
+      chartTimerRef.current = null;
     }
     if (uiUpdateTimerRef.current !== null) {
       window.clearTimeout(uiUpdateTimerRef.current);
@@ -437,9 +477,9 @@ function Dashboard() {
 
   React.useEffect(() => {
     return () => {
-      if (rafIdRef.current !== null) {
-        window.cancelAnimationFrame(rafIdRef.current);
-        rafIdRef.current = null;
+      if (chartTimerRef.current !== null) {
+        window.clearInterval(chartTimerRef.current);
+        chartTimerRef.current = null;
       }
       if (uiUpdateTimerRef.current !== null) {
         window.clearTimeout(uiUpdateTimerRef.current);
@@ -927,7 +967,7 @@ function Dashboard() {
 
                     <Line
                       yAxisId="left"
-                      type="monotone"
+                      type="linear"
                       dataKey="pressure"
                       dot={false}
                       stroke={COLOR_PRESS}
@@ -936,7 +976,7 @@ function Dashboard() {
                     />
                     <Line
                       yAxisId="right"
-                      type="monotone"
+                      type="linear"
                       dataKey="magnet"
                       dot={false}
                       stroke={COLOR_MAGNET}
