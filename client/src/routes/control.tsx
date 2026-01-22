@@ -63,6 +63,7 @@ function gramsToNewtons(m_g: number) {
 }
 
 type EspState = {
+  t_ms?: number;
   mv?: number;
   r?: number;
   g?: number;
@@ -172,6 +173,9 @@ function Dashboard() {
   // Align PULSE phase to the moment we enter PULSE mode (reduces apparent phase shift)
   const pulseStartMsRef = React.useRef<number | null>(null);
   const lastModeRef = React.useRef<number | null>(null);
+  // Map ESP millis() timeline to browser time to avoid jitter/phase artifacts.
+  // offsetMs = Date.now() - esp_t_ms
+  const espTimeOffsetMsRef = React.useRef<number | null>(null);
 
   const scheduleUiUpdate = React.useCallback(() => {
     if (uiUpdateTimerRef.current !== null) return;
@@ -307,7 +311,7 @@ function Dashboard() {
 
   // Timer effect to update chart at a fixed rate
   React.useEffect(() => {
-    // Update the chart at a fixed rate (e.g. 20 Hz) to avoid re-rendering on every MQTT packet.
+    // Update the chart at a fixed rate (e.g. 10 Hz) to avoid re-rendering on every MQTT packet.
     if (chartTimerRef.current !== null) {
       window.clearInterval(chartTimerRef.current);
       chartTimerRef.current = null;
@@ -317,7 +321,7 @@ function Dashboard() {
       if (!pendingChartUpdateRef.current) return;
       pendingChartUpdateRef.current = false;
       computeAndSetViewData();
-    }, 50); // 20 Hz
+    }, 100); // 10 Hz (wystarcza dla podglądu, odciąża UI)
 
     return () => {
       if (chartTimerRef.current !== null) {
@@ -419,9 +423,18 @@ function Dashboard() {
           lastStateRef.current = obj;
           scheduleUiUpdate();
 
-          const t = Date.now();
+          // Prefer ESP timestamp (millis) to eliminate network jitter on the X axis.
+          // Compute a stable offset once per session.
+          const espT = typeof obj.t_ms === "number" ? obj.t_ms : null;
+          if (espT !== null && espTimeOffsetMsRef.current === null) {
+            espTimeOffsetMsRef.current = Date.now() - espT;
+          }
+          const t =
+            espT !== null && espTimeOffsetMsRef.current !== null
+              ? espT + espTimeOffsetMsRef.current
+              : Date.now();
 
-          // Wykryj zmianę trybu, aby ustawić punkt startowy fazy PULSE
+          // Wykryj zmianę trybu (zachowane dla kompatybilności, ale dla PULSE i tak preferujemy magOutPct z ESP)
           const modeNow = obj.mode ?? 0;
           if (lastModeRef.current !== modeNow) {
             if (modeNow === 1) {
@@ -433,6 +446,7 @@ function Dashboard() {
           }
 
           const pressureN = gramsToNewtons(Number(obj.g ?? 0));
+          // This will use obj.magOutPct when provided by ESP (no unwanted phase shift)
           const magnet = estimateMagnetPct(obj, t, pulseStartMsRef.current);
 
           // PUSH do bufora - bez renderowania tutaj!
@@ -471,6 +485,7 @@ function Dashboard() {
     // Clear pulse phase alignment refs on logout
     pulseStartMsRef.current = null;
     lastModeRef.current = null;
+    espTimeOffsetMsRef.current = null;
     setConnected(false);
     setStatusText("Rozłączony");
   };
@@ -488,6 +503,7 @@ function Dashboard() {
       // Clear pulse phase alignment refs on unmount
       pulseStartMsRef.current = null;
       lastModeRef.current = null;
+      espTimeOffsetMsRef.current = null;
       clientRef.current?.end(true);
       clientRef.current = null;
     };
