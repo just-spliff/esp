@@ -53,11 +53,9 @@ const TOPIC_BASE = "fsrmag";
 const COLOR_MAGNET = "#7C3AED"; // fiolet
 const COLOR_PRESS = "#22C55E"; // zielony
 const WINDOW_MS = 30_000; // Okno czasu: 30 sekund
-const MAX_VIEW_POINTS = 800; // limit punktów renderowanych na wykresie (wydajność)
+const MAX_VIEW_POINTS = 1200; // limit punktów renderowanych na wykresie (wydajność)
 
 const G0 = 9.81; // [m/s^2] przyspieszenie ziemskie do przeliczenia g -> N
-const SMOOTH_PRESS_ALPHA = 0.25;
-const SMOOTH_MAG_ALPHA = 0.25;
 
 function gramsToNewtons(m_g: number) {
   // m_g: masa w gramach (równoważnik), wynik: siła w niutonach
@@ -87,12 +85,13 @@ type Point = {
 
 type RecordedPoint = {
   t: number; // ms (Date.now)
-  g: number; // grams from ESP (raw)
-  pressureN_raw: number;
-  pressureN: number; // smoothed
-  magnet_raw: number;
-  magnet: number; // smoothed
+  t_iso: string;
   mode: number;
+  mv: number;
+  r: number;
+  g: number;
+  pressureN: number;
+  magnetPct: number;
 };
 
 function clamp(v: number, lo: number, hi: number) {
@@ -185,10 +184,6 @@ function Dashboard() {
   const pulseStartMsRef = React.useRef<number | null>(null);
   const lastModeRef = React.useRef<number | null>(null);
 
-  // EMA smoothing state (kept across MQTT packets)
-  const pressEmaRef = React.useRef<number | null>(null);
-  const magEmaRef = React.useRef<number | null>(null);
-
   const scheduleUiUpdate = React.useCallback(() => {
     if (uiUpdateTimerRef.current !== null) return;
 
@@ -225,7 +220,6 @@ function Dashboard() {
   const [pulseHz, setPulseHz] = React.useState("2");
   const [pulseAmp, setPulseAmp] = React.useState("60");
   const [helpOpen, setHelpOpen] = React.useState(false);
-
   // === RECORDING ===
   const [isRecording, setIsRecording] = React.useState(false);
   const recordedRef = React.useRef<RecordedPoint[]>([]);
@@ -337,7 +331,7 @@ function Dashboard() {
       if (!pendingChartUpdateRef.current) return;
       pendingChartUpdateRef.current = false;
       computeAndSetViewData();
-    }, 66); // 20 Hz
+    }, 50); // 20 Hz
 
     return () => {
       if (chartTimerRef.current !== null) {
@@ -456,44 +450,28 @@ function Dashboard() {
             lastModeRef.current = modeNow;
           }
 
-          const gRaw = Number(obj.g ?? 0);
-          const pressureRaw = gramsToNewtons(gRaw);
-          const magnetRaw = estimateMagnetPct(obj, t, pulseStartMsRef.current);
+          const g = Number(obj.g ?? 0);
+          const pressureN = gramsToNewtons(g);
+          const magnet = estimateMagnetPct(obj, t, pulseStartMsRef.current);
 
-          // EMA smoothing
-          if (pressEmaRef.current === null) pressEmaRef.current = pressureRaw;
-          else {
-            pressEmaRef.current =
-              pressEmaRef.current +
-              SMOOTH_PRESS_ALPHA * (pressureRaw - pressEmaRef.current);
-          }
-
-          if (magEmaRef.current === null) magEmaRef.current = magnetRaw;
-          else {
-            magEmaRef.current =
-              magEmaRef.current +
-              SMOOTH_MAG_ALPHA * (magnetRaw - magEmaRef.current);
-          }
-
-          const pressureN = pressEmaRef.current;
-          const magnet = magEmaRef.current;
-
-          // PUSH do bufora
+          // PUSH do bufora - bez renderowania tutaj!
           pointsBufferRef.current.push({ t, pressure: pressureN, magnet });
 
-          // Recording
+          // RECORDING (optional)
           if (isRecording) {
-            recordedRef.current.push({
+            const rec: RecordedPoint = {
               t,
-              g: gRaw,
-              pressureN_raw: pressureRaw,
-              pressureN,
-              magnet_raw: magnetRaw,
-              magnet,
+              t_iso: new Date(t).toISOString(),
               mode: obj.mode ?? 0,
-            });
+              mv: Number(obj.mv ?? 0),
+              r: Number(obj.r ?? 0),
+              g,
+              pressureN,
+              magnetPct: magnet,
+            };
+            recordedRef.current.push(rec);
 
-            // Safety cap
+            // Safety cap for very long recordings
             const MAX_REC = 200_000;
             if (recordedRef.current.length > MAX_REC) {
               recordedRef.current = recordedRef.current.slice(
@@ -538,8 +516,6 @@ function Dashboard() {
     // Clear pulse phase alignment refs on logout
     pulseStartMsRef.current = null;
     lastModeRef.current = null;
-    pressEmaRef.current = null;
-    magEmaRef.current = null;
     setIsRecording(false);
     setConnected(false);
     setStatusText("Rozłączony");
@@ -558,8 +534,7 @@ function Dashboard() {
       // Clear pulse phase alignment refs on unmount
       pulseStartMsRef.current = null;
       lastModeRef.current = null;
-      pressEmaRef.current = null;
-      magEmaRef.current = null;
+      setIsRecording(false);
       clientRef.current?.end(true);
       clientRef.current = null;
     };
@@ -599,26 +574,25 @@ function Dashboard() {
       "t_ms",
       "t_iso",
       "mode",
+      "mv",
+      "r_ohm",
       "g",
-      "pressureN_raw",
       "pressureN",
-      "magnet_raw",
-      "magnet",
+      "magnetPct",
     ];
 
-    const lines = [header.join(",")];
+    const lines: string[] = [header.join(",")];
     for (const r of rows) {
-      const iso = new Date(r.t).toISOString();
       lines.push(
         [
           r.t,
-          iso,
+          r.t_iso,
           r.mode,
+          r.mv,
+          r.r,
           r.g,
-          r.pressureN_raw.toFixed(6),
           r.pressureN.toFixed(6),
-          r.magnet_raw.toFixed(6),
-          r.magnet.toFixed(6),
+          r.magnetPct.toFixed(6),
         ].join(","),
       );
     }
