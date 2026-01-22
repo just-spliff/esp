@@ -54,6 +54,13 @@ const COLOR_MAGNET = "#7C3AED"; // fiolet
 const COLOR_PRESS = "#22C55E"; // zielony
 const WINDOW_MS = 30_000; // Okno czasu: 30 sekund
 
+const G0 = 9.81; // [m/s^2] przyspieszenie ziemskie do przeliczenia g -> N
+
+function gramsToNewtons(m_g: number) {
+  // m_g: masa w gramach (równoważnik), wynik: siła w niutonach
+  return (m_g / 1000) * G0;
+}
+
 type EspState = {
   mv?: number;
   r?: number;
@@ -302,11 +309,11 @@ function Dashboard() {
           }
 
           const t = Date.now();
-          const pressure = Number(obj.g ?? 0);
+          const pressureN = gramsToNewtons(Number(obj.g ?? 0));
           const magnet = estimateMagnetPct(obj, t);
 
           // PUSH do bufora - bez renderowania tutaj!
-          pointsBufferRef.current.push({ t, pressure, magnet });
+          pointsBufferRef.current.push({ t, pressure: pressureN, magnet });
           // Aktualizuj wykres najbliższą klatką (maks. ~60 FPS), tylko gdy pojawiają się nowe dane
           scheduleChartUpdate();
         } catch {
@@ -361,7 +368,7 @@ function Dashboard() {
 
   // Ostatnie wartości do liczników
   const currentMag = viewData.length ? viewData[viewData.length - 1].magnet : 0;
-  const currentG = typeof state.g === "number" ? state.g : 0;
+  const currentN = viewData.length ? viewData[viewData.length - 1].pressure : 0;
 
   if (!connected) {
     return (
@@ -465,9 +472,9 @@ function Dashboard() {
                     Nacisk
                   </div>
                   <div className="text-3xl font-bold tabular-nums tracking-tighter text-slate-900">
-                    {currentG.toFixed(1)}{" "}
+                    {currentN.toFixed(3)}{" "}
                     <span className="text-base font-normal text-muted-foreground">
-                      g
+                      N
                     </span>
                   </div>
                 </CardContent>
@@ -795,7 +802,7 @@ function Dashboard() {
                         if (name === "pressure")
                           return [
                             <span style={{ color: COLOR_PRESS }}>
-                              {Number(value).toFixed(1)} g
+                              {Number(value).toFixed(3)} N
                             </span>,
                             "Nacisk",
                           ];
